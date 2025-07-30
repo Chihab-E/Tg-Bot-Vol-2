@@ -24,6 +24,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load environment variables
+from dotenv import load_dotenv
+load_dotenv() # Make sure this is at the very top of your script or after imports
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALIEXPRESS_APP_KEY = os.getenv("ALIEXPRESS_APP_KEY")
 ALIEXPRESS_APP_SECRET = os.getenv("ALIEXPRESS_APP_SECRET")
@@ -72,11 +75,17 @@ class AliExpressAPI:
         """Extracts the product ID from a given AliExpress URL."""
         # First, try to resolve if it's a short URL
         resolved_url = url
+        # Only attempt resolution if it matches the known short URL pattern
         if self.short_url_pattern.match(url):
-            resolved_url = requests.head(url, allow_redirects=True, timeout=10).url
-            if not resolved_url:
-                logger.warning(f"Could not resolve short URL to get product ID: {url}")
+            try:
+                resolved_url = requests.head(url, allow_redirects=True, timeout=10).url
+                if not resolved_url:
+                    logger.warning(f"Could not resolve short URL to get product ID: {url}")
+                    return None
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error resolving short URL {url}: {e}")
                 return None
+
 
         for pattern in self.product_id_patterns:
             match = pattern.search(resolved_url)
@@ -121,7 +130,6 @@ class AliExpressAPI:
                         for link_obj in promotion_links:
                             if "promotion_link" in link_obj:
                                 # We assume the main affiliate link is the one we want
-                                # If you need a specific type (e.g., app link), you might check for specific query params in link_obj['promotion_link']
                                 return link_obj["promotion_link"]
                 else:
                     error_msg = resp_result.get("resp_msg", "Unknown error") if resp_result else "No resp_result"
@@ -195,7 +203,7 @@ class AliExpressAPI:
             aff_trace_key = aff_params.get("aff_trace_key", [""])[0]
             terminal_id = aff_params.get("terminal_id", [""])[0] # Often '5050', '2' or '4'
 
-            base_coin_url = "https://a.aliexpress.com/_coin-index"
+            base_coin_url = "https://a.aliexpress.com/_coin-index" # Using 'a.aliexpress.com' for more direct app link
             
             # Use a dictionary to build parameters for cleaner URL encoding
             coin_params = {
@@ -219,10 +227,9 @@ api = AliExpressAPI(ALIEXPRESS_APP_KEY, ALIEXPRESS_APP_SECRET, ALIEXPRESS_TRACKI
 
 # Inline keyboard setup (simplified)
 keyboard_main = InlineKeyboardMarkup(
-    [[InlineKeyboardButton("❤️ اشترك في القناة للمزيد من العروض ❤️", url="t.me/Tcoupon")]]
+    [[InlineKeyboardButton("❤️ اشترك في القناة للمزيد من العروض ❤️", url="https://t.me/Tcoupon")]] # Ensure it's a full URL
 )
 
-@logger.catch
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message with instructions."""
     await update.message.reply_text(
@@ -232,7 +239,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode='HTML'
     )
 
-@logger.catch
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Processes user messages, extracts links, and generates discount links."""
     text = update.message.text
@@ -255,6 +261,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         # Step 1: Extract Product ID
+        # Added await here because resolve_short_url is async (if you keep it async in the class)
+        # Note: I changed extract_product_id slightly to handle its own resolution,
+        # so this specific `await` might not be strictly necessary depending on `extract_product_id`'s internal structure
+        # but it's safer if async calls are inside.
         product_id = api.extract_product_id(found_url)
         if not product_id:
             await processing_msg.edit_text(
@@ -327,7 +337,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
     except Exception as e:
-        logger.exception("An unhandled error occurred in handle_message:")
+        logger.exception("An unhandled error occurred in handle_message:") # logger.exception logs traceback
         await processing_msg.edit_text(
             "❌ حدث خطأ غير متوقع أثناء معالجة طلبك. يرجى المحاولة مرة أخرى لاحقًا."
         )
@@ -343,9 +353,4 @@ def main():
     application.run_polling(poll_interval=1, timeout=30, read_timeout=10, write_timeout=10) # Adjust timeouts as needed
 
 if __name__ == "__main__":
-    # Ensure all required environment variables are set before running
-    # You'll need to set these in your environment or a .env file (and load it)
-    # Example (if using python-dotenv, which you should for local development):
-    # from dotenv import load_dotenv
-    # load_dotenv()
     main()
