@@ -9,7 +9,12 @@ import json
 from urllib.parse import quote, parse_qs, urlparse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -25,13 +30,16 @@ class AliExpressAPI:
     
     def generate_signature(self, params, api_name):
         """Generate API signature for AliExpress API"""
+        # Sort parameters
         sorted_params = sorted(params.items())
         
+        # Create query string
         query_string = api_name
         for key, value in sorted_params:
             query_string += f"{key}{value}"
         query_string += self.app_secret
         
+        # Generate signature
         signature = hmac.new(
             self.app_secret.encode('utf-8'),
             query_string.encode('utf-8'),
@@ -45,10 +53,16 @@ class AliExpressAPI:
         Get affiliate link for a product
         promotion_link_type: "0" for PC, "2" for mobile
         """
-        # Extract product ID from URL
-        product_id = self.extract_product_id(product_url)
+        # First resolve any short URLs to get the actual product URL
+        resolved_url = self.resolve_short_url(product_url)
+        
+        # Extract product ID from resolved URL
+        product_id = self.extract_product_id(resolved_url)
         if not product_id:
             return None
+        
+        # Create a clean product URL for the API
+        clean_url = f"https://www.aliexpress.com/item/{product_id}.html"
         
         # Prepare API parameters
         timestamp = str(int(time.time() * 1000))
@@ -62,7 +76,7 @@ class AliExpressAPI:
             "v": "2.0",
             "format": "json",
             "promotion_link_type": promotion_link_type,
-            "source_values": product_url,
+            "source_values": clean_url,
             "tracking_id": self.tracking_id
         }
         
@@ -92,20 +106,59 @@ class AliExpressAPI:
             logger.error(f"API request failed: {e}")
             return None
     
+    def resolve_short_url(self, url):
+        """Resolve short/affiliate URLs to get the actual product URL"""
+        try:
+            # Handle s.click.aliexpress.com and other short URLs
+            if 's.click.aliexpress.com' in url or 'bit.ly' in url or 'tinyurl.com' in url:
+                response = requests.head(url, allow_redirects=True, timeout=10)
+                return response.url
+            return url
+        except Exception as e:
+            logger.error(f"Error resolving short URL {url}: {e}")
+            return url
+    
     def extract_product_id(self, url):
-        """Extract product ID from AliExpress URL"""
+        """Extract product ID from AliExpress URL (including affiliate links)"""
+        # First, resolve any short URLs
+        resolved_url = self.resolve_short_url(url)
+        logger.info(f"Resolved URL: {resolved_url}")
+        
+        # Patterns to extract product ID from various URL formats
         patterns = [
+            # Standard product pages
             r'/item/(\d+)\.html',
             r'productIds=(\d+)',
             r'/(\d+)\.html',
-            r'aliexpress\.com/item/([^/]+)',
-            r'product/(\d+)'
+            r'product/(\d+)',
+            # Mobile URLs
+            r'm\.aliexpress\.com/item/(\d+)',
+            r'm\.aliexpress\.com.*?(\d{10,})',
+            # Affiliate URLs after resolution
+            r'aliexpress\.com/item/(\d+)',
+            r'aliexpress\.com.*?(\d{10,})',
+            # Deep links and app links
+            r'productId[=:](\d+)',
+            r'itemId[=:](\d+)',
+            # Extract from any URL containing long numbers (likely product IDs)
+            r'(\d{10,})'
         ]
         
         for pattern in patterns:
+            match = re.search(pattern, resolved_url)
+            if match:
+                product_id = match.group(1)
+                # Validate that it looks like a product ID (10+ digits)
+                if len(product_id) >= 10:
+                    return product_id
+        
+        # If no pattern matches, try to extract from original URL too
+        for pattern in patterns:
             match = re.search(pattern, url)
             if match:
-                return match.group(1)
+                product_id = match.group(1)
+                if len(product_id) >= 10:
+                    return product_id
         
         return None
     
@@ -179,20 +232,34 @@ Just send me a link to get started! 🚀
         help_message = """
 🔧 **How to use this bot:**
 
-1. **Find a product** on AliExpress
+1. **Find a product** on AliExpress (or get a link from someone else)
 2. **Copy the link** (any AliExpress product URL)
 3. **Send it here** - just paste and send
-4. **Get your coin discount link** instantly!
+4. **Get your coin discount link** with YOUR affiliate tracking!
 
-**Supported link formats:**
-• https://www.aliexpress.com/item/...
-• https://aliexpress.com/item/...
-• https://m.aliexpress.com/item/...
-• Short AliExpress links (s.click.aliexpress.com)
+**✅ Supported link formats:**
+• `https://www.aliexpress.com/item/...` - Regular product links
+• `https://m.aliexpress.com/item/...` - Mobile links
+• `https://s.click.aliexpress.com/e/...` - **Other people's affiliate links**
+• Short links and redirects
+• Any AliExpress product URL
 
-**Example:**
-Send: `https://www.aliexpress.com/item/1005004633663909.html`
-Get: Mobile coin discount link with extra savings! 💰
+**🔄 What happens to affiliate links:**
+When you send someone else's affiliate link, the bot will:
+• Extract the product information
+• Generate a NEW link with YOUR affiliate tracking
+• Convert it to a coin discount format
+• You earn the commission instead! 💰
+
+**💡 Example:**
+**Send:** `https://s.click.aliexpress.com/e/_onrOEQB`
+**Get:** Mobile coin discount link with YOUR tracking ID
+
+**🎯 Pro Tips:**
+• Works with any AliExpress link format
+• Automatically handles redirects
+• Converts competitor affiliate links
+• Provides extra coin discounts for users
 
 **Need help?** Just send /help anytime!
         """
@@ -202,68 +269,133 @@ Get: Mobile coin discount link with extra savings! 💰
         """Handle incoming messages with URLs"""
         message_text = update.message.text
         
+        # Enhanced patterns to detect various AliExpress links including affiliate links
         aliexpress_patterns = [
-            r'https?://(?:www\.)?aliexpress\.com/item/\d+\.html',
-            r'https?://(?:www\.)?aliexpress\.com/item/[^/]+',
-            r'https?://m\.aliexpress\.com/item/\d+\.html',
+            # Standard AliExpress URLs
+            r'https?://(?:www\.)?aliexpress\.com/item/\d+\.html[^\s]*',
+            r'https?://(?:www\.)?aliexpress\.com/item/[^/\s]+[^\s]*',
+            r'https?://m\.aliexpress\.com/item/\d+\.html[^\s]*',
+            r'https?://m\.aliexpress\.com/[^\s]*',
+            # Short and affiliate links
             r'https?://s\.click\.aliexpress\.com/e/[^/\s]+',
-            r'https?://(?:www\.)?aliexpress\.com/[^\s]*'
+            r'https?://(?:www\.)?aliexpress\.com/[^\s]*',
+            r'https?://[^/]*aliexpress[^/]*\.com/[^\s]*',
+            # Mobile coin index links (already converted)
+            r'https?://m\.aliexpress\.com/p/coin-index/[^\s]*',
+            # Any URL containing aliexpress
+            r'https?://[^\s]*aliexpress[^\s]*'
         ]
         
         found_url = None
         for pattern in aliexpress_patterns:
             match = re.search(pattern, message_text)
             if match:
-                found_url = match.group(0)
+                found_url = match.group(0).rstrip('.,;!?')  # Remove trailing punctuation
                 break
         
         if not found_url:
             await update.message.reply_text(
                 "❌ No AliExpress link found!\n\n"
                 "Please send a valid AliExpress product link.\n"
-                "Example: https://www.aliexpress.com/item/1005004633663909.html"
+                "📝 **Supported formats:**\n"
+                "• Regular product links\n"
+                "• Mobile links\n"
+                "• Affiliate links (s.click.aliexpress.com)\n"
+                "• Short links\n\n"
+                "**Example:** https://www.aliexpress.com/item/1005004633663909.html",
+                parse_mode='Markdown'
             )
             return
         
+        # Check if it's already a coin discount link
+        if 'coin-index' in found_url:
+            await update.message.reply_text(
+                "ℹ️ This link is already a coin discount link!\n\n"
+                "You can use it directly to get coin discounts. 🪙"
+            )
+            return
+        
+        # Show processing message
         processing_msg = await update.message.reply_text("🔄 Processing your link...")
         
         try:
+            # Log original URL for debugging
+            logger.info(f"Processing URL: {found_url}")
+            
+            # Get product ID (this will handle affiliate links and redirects)
             product_id = self.api.extract_product_id(found_url)
             if not product_id:
-                await processing_msg.edit_text("❌ Could not extract product ID from the link.")
+                await processing_msg.edit_text(
+                    "❌ Could not extract product ID from the link.\n\n"
+                    "Please make sure you're sending a valid AliExpress product link."
+                )
                 return
             
+            logger.info(f"Extracted Product ID: {product_id}")
+            
+            # Get affiliate link with YOUR tracking ID
             affiliate_link = self.api.get_affiliate_link(found_url, promotion_link_type="2")
             if not affiliate_link:
-                await processing_msg.edit_text("❌ Could not generate affiliate link. Please try again later.")
+                await processing_msg.edit_text(
+                    "❌ Could not generate affiliate link.\n\n"
+                    "This might be due to:\n"
+                    "• API rate limits\n"
+                    "• Invalid product\n"
+                    "• Temporary server issues\n\n"
+                    "Please try again in a few moments."
+                )
                 return
             
+            # Create coin discount link
             coin_link = self.api.create_coin_discount_link(affiliate_link, product_id)
             if not coin_link:
                 await processing_msg.edit_text("❌ Could not create coin discount link.")
                 return
             
+            # Determine link type for user info
+            link_type = "🔗 Regular link"
+            if 's.click.aliexpress.com' in found_url:
+                link_type = "🔄 Affiliate link (converted to yours)"
+            elif 'm.aliexpress.com' in found_url:
+                link_type = "📱 Mobile link"
+            
+            # Send success message
             success_message = f"""
 ✅ **Coin Discount Link Generated!**
 
-🔗 **Your Link:**
+**Original:** {link_type}
+**Product ID:** `{product_id}`
+
+🔗 **Your Coin Discount Link:**
 {coin_link}
 
 💰 **Benefits:**
 • Mobile coin discounts available
 • Extra savings on checkout
 • Optimized for mobile shopping
+• **Your affiliate tracking active** 📈
 
-**Product ID:** `{product_id}`
+🎯 **How to use:**
+1. Click the link above
+2. Look for coin discount options
+3. Apply coins at checkout
+4. Enjoy extra savings!
 
-Enjoy your savings! 🛍️
+Happy shopping! 🛍️
             """
             
             await processing_msg.edit_text(success_message, parse_mode='Markdown')
             
         except Exception as e:
             logger.error(f"Error processing link: {e}")
-            await processing_msg.edit_text("❌ An error occurred while processing your link. Please try again.")
+            await processing_msg.edit_text(
+                "❌ An error occurred while processing your link.\n\n"
+                "**Possible causes:**\n"
+                "• Network connectivity issues\n"
+                "• API temporarily unavailable\n"
+                "• Invalid or expired product link\n\n"
+                "Please try again or contact support if the issue persists."
+            )
     
     def run(self):
         """Start the bot"""
@@ -271,11 +403,13 @@ Enjoy your savings! 🛍️
         self.app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 def main():
+    # Load configuration from environment variables
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     ALIEXPRESS_APP_KEY = os.getenv("ALIEXPRESS_APP_KEY")
     ALIEXPRESS_APP_SECRET = os.getenv("ALIEXPRESS_APP_SECRET")
     ALIEXPRESS_TRACKING_ID = os.getenv("ALIEXPRESS_TRACKING_ID")
     
+    # Validate configuration
     missing_vars = []
     if not BOT_TOKEN:
         missing_vars.append("BOT_TOKEN")
@@ -291,9 +425,11 @@ def main():
         logger.error("Please set all required environment variables before running the bot.")
         return
     
+    # Initialize API and bot
     api = AliExpressAPI(ALIEXPRESS_APP_KEY, ALIEXPRESS_APP_SECRET, ALIEXPRESS_TRACKING_ID)
     bot = TelegramBot(BOT_TOKEN, api)
     
+    # Start bot
     bot.run()
 
 if __name__ == "__main__":
